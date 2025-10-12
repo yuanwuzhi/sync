@@ -1,0 +1,32 @@
+# MySQL 表结构对比与同步工具配置
+
+# 数据库连接配置
+databases:
+  # 源数据库配置
+  source_db:
+    dsn:  "root:mysql_S6Qbej@tcp(119.91.228.85:3306)/trace_rule?parseTime=true"
+    description: "源数据库 - 作为参考标准的数据库结构"
+
+  # 目标数据库配置
+  target_db:
+    dsn:  "root:root@tcp(127.0.0.1:3306)/D2VM?parseTime=true"
+    description: "目标数据库 - 需要与源数据库保持同步的数据库"
+
+# 同步选项配置
+options:
+  # 是否在同步计划中包含 DROP COLUMN 语句
+  # 设为 false 时仅生成 ADD 和 MODIFY 语句
+  allow_column_drop: false
+
+  # 是否在同步计划中包含 DROP INDEX 语句
+  allow_index_drop: true
+
+  # 是否合并输出所有表的差异到单个文件
+  # 设为 true 时，所有表的差异会合并到一个 JSON 和一个 SQL 文件中
+  # 设为 false 时，每个表会生成独立的 JSON 和 SQL 文件
+  merge_output: true
+
+# 日志设置
+logging:
+  level: "info"  # 可选值：debug, info, warn, error
+  format: "text" # 可选值：text, json

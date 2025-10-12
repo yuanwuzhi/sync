@@ -1,0 +1,67 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: haios-mysql-service
+  namespace: default
+  labels:
+    app: haios-mysql
+spec:
+  selector:
+    app: haios-test # 匹配Pod的标签
+  ports:
+    - protocol: TCP
+      port: 3306       # Service对外暴露的端口
+      targetPort: 3306 # 容器内部的端口
+  type: ClusterIP       # 默认类型，集群内部可访问
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gpu-metrics-config
+  namespace: default
+data:
+  collector.py: |
+    # 代码部分不粘贴，参考私有仓库文档
+    print("GPU metrics collector running...")
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: gpu-metrics-collector
+  namespace: default
+spec:
+  schedule: "*/30 * * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: gpu-metrics-collector
+          hostNetwork: true
+          tolerations:
+            - key: "node-role.kubernetes.io/master"
+              operator: "Exists"
+              effect: "NoSchedule"
+            - key: "node-role.kubernetes.io/control-plane"
+              operator: "Exists"
+              effect: "NoSchedule"
+          containers:
+            - name: gpu-metrics-collector
+              image: gpumetrics-python3:v1
+              imagePullPolicy: IfNotPresent
+              command: [ "/usr/local/bin/python3", "/app/collector.py" ]
+              resources:
+                requests:
+                  cpu: 100m
+                  memory: 128Mi
+                limits:
+                  cpu: 500m
+                  memory: 256Mi
+              volumeMounts:
+                - name: script-volume
+                  mountPath: /app
+          volumes:
+            - name: script-volume
+              configMap:
+                name: gpu-metrics-config
+          restartPolicy: OnFailure

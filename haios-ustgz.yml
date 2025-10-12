@@ -1,0 +1,143 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haios-ustgz-deployment
+spec:
+  selector:
+    matchLabels:
+      app: haios-ustgz
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: haios-ustgz
+    spec:
+      containers:
+        - name: haios-mysql
+          image: haios-mysql:8.0.36-debian-v1
+          env:                                # 定义环境变量列表, 这里的密码需要与Django中配置的密码相同，由于后者已经配置为root，所以这里必须为root
+            - name: MYSQL_ROOT_PASSWORD
+              value: "root"
+          volumeMounts:
+            - mountPath: /var/lib/mysql
+              name: haios-mysql-data
+            - mountPath: /var/log/mysql
+              name: haios-mysql-log
+            - mountPath: /etc/mysql/my.cnf
+              name: haios-mysql-config
+              readOnly: true
+        - name: haios
+          image: haios:v1.0.3
+          # args:
+          # - sleep 7200;
+          # command:
+          # - /bin/bash
+          # - -c
+          # - --
+          env:  # 定义环境变量列表               下述11个环境变量需根据具体情况修改（必填）
+            - name: SSH_USER                      # 环境变量1：master能够ssh免密连到的各台机器的用户
+              value: "gpu"
+            - name: MASTER_IP                     # 环境变量2：master IP
+              value: "10.120.17.105"
+            - name: MASTER_PORT                   # 环境变量3：与HAIOS系统通信的端口
+              value: "32320"
+            - name: IMAGE_REGISTRY_IP             # 环境变量4：镜像仓库IP
+              value: "10.120.17.105"
+            - name: IMAGE_REGISTRY_PORT           # 环境变量5：镜像仓库端口
+              value: "5010"
+            - name: EMAIL_HOST                    # 环境变量6：邮箱服务器（和使用的具体邮箱相关）
+              value: "smtp.163.com"
+            - name: EMAIL_PORT                    # 环境变量7：一般情况下都为25（SMTP）
+              value: "25"
+            - name: EMAIL_HOST_USER               # 环境变量8：给用户发送邮件的账号
+              value: "rui_lab@163.com"
+            - name: EMAIL_USE_TLS                 # 环境变量9：是否应该使用 TLS 加密。一般都为False
+              value: "False"
+            - name: EMAIL_FROM                    # 环境变量10：给用户发送邮件的账号
+              value: "rui_lab@163.com"
+            - name: EMAIL_HOST_PASSWORD           # 环境变量11：密码 (注意：这里的密码指的是授权码)
+              value: "FTHDWAUQTCGHCZOK"
+              # valueFrom:
+              #   secretKeyRef:
+              #     name: secret-name
+              #     key: secret-key
+            - name: VOLUME_DIR_PREFIX             # 环境变量12：共享目录
+              value: "/data/VM/"
+            - name: ADMIN_EMAIL                   # 环境变量13：admin用户的邮箱
+              value: "rui_lab@163.com"
+            - name: ADMIN_PWD                     # 环境变量14：admin用户的密码
+              value: "ustgz-admin"
+            - name: COMPANY_NAME                  # 环境变量15：公司名（用于发送邮件时的标题显示）
+              value: "元Space科研智算空间"
+            - name: K8S_JOIN                      # 环境变量16：加入集群的命令（在master通过kubeadm token create --ttl 0 --print-join-command生成）
+              value: "kubeadm join 10.120.17.105:6443 --token nbyp7i.p3qqa6ys2t5f2uxd --discovery-token-ca-cert-hash sha256:0176899aace8d6dbada244f1961be2692f45ffebce438dc396e13a15d1d1ce4d"
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 32320
+              name: back-end-port
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /app/D2VM/pod_config
+              name: haios-app-pod-config
+            - mountPath: /app/D2VM/logs
+              name: haios-app-log
+            # - mountPath: /app/D2VM/D2VM/settings.py
+            #   name: haios-app-settings
+            - mountPath: /data/VM
+              name: haios-share-volumes
+            - mountPath: /root/.kube
+              name: haios-kubelets-config
+              readOnly: true
+            - mountPath: /root/.ssh
+              name: haios-ssh-config
+              readOnly: true
+      dnsPolicy: Default
+      nodeSelector:
+        node-role.kubernetes.io/master: ""
+      tolerations:
+        - key: node-role.kubernetes.io/master # tolerate the master node
+          operator: Exists
+          effect: NoSchedule
+      volumes:                                    # 下述8个路径需根据具体情况修改（必填）
+        - hostPath:
+            path: /data/haios/mysql/data         # 路径1：用于存放mysql数据库数据
+          name: haios-mysql-data
+        - hostPath:
+            path: /data/haios/mysql/log          # 路径2：用于存放mysql的log数据
+          name: haios-mysql-log
+        - hostPath:
+            path: /data/haios/mysql/conf/my.cnf  # 路径3：用于存放mysql配置文件
+          name: haios-mysql-config
+        - hostPath:
+            path: /data/VM/                                    # 路径4：所有机器共享的目录，用于存放用户数据，与前面VOLUME_DIR_PREFIX相同
+          name: haios-share-volumes
+        - hostPath:
+            path: /data/haios/pod_config         # 路径5：用于存放各个pod的配置文件
+          name: haios-app-pod-config
+        - hostPath:
+            path: /data/haios/logs               # 路径6：用于存放各个系统运行的log
+          name: haios-app-log
+        # - hostPath:
+        #     path: /data/haios/settings.py
+        #   name: haios-app-settings
+        - hostPath:
+            path: /home/gpu/.kube                       # 路径7：将kubelet配置文件映射进去，这样才有权限和kubelet apiserver通信
+          name: haios-kubelets-config
+        - hostPath:
+            path: /home/gpu/.ssh                        # 路径8：将ssh配置文件映射进去，这样才有权限和跨机器ssh通信
+          name: haios-ssh-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: haios-ports
+spec:
+  ports:
+    - name: back-end-port
+      nodePort: 32320     # 与前面设置的MASTER_PORT相同
+      port: 32320
+      protocol: TCP
+      targetPort: 32320
+  selector:
+    app: haios-ustgz
+  type: NodePort

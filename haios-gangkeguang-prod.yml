@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: haios-ustgz-deployment
+spec:
+  selector:
+    matchLabels:
+      app: haios-ustgz
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: haios-ustgz
+    spec:
+      containers:
+        - name: haios-mysql
+          image: haios-mysql:8.0.36-debian-v1
+          env:
+            - name: MYSQL_ROOT_PASSWORD
+              value: "root"
+          volumeMounts:
+            - mountPath: /var/lib/mysql
+              name: haios-mysql-data
+            - mountPath: /var/log/mysql
+              name: haios-mysql-log
+            - mountPath: /etc/mysql/my.cnf
+              name: haios-mysql-config
+              readOnly: true
+        - name: haios
+          image: haios:v1.1.1
+
+          # envFrom:
+          # - configMapRef:
+          #     name: haios-config
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 32320
+              name: back-end-port
+              protocol: TCP
+          volumeMounts:
+            - mountPath: /app/D2VM
+              name: haios-app
+            - mountPath: /app/D2VM/pod_config
+              name: haios-app-pod-config
+            - mountPath: /app/D2VM/logs
+              name: haios-app-log
+            # - mountPath: /app/D2VM/D2VM/settings.py
+            #   name: haios-app-settings
+            - mountPath: /data/VM         # 所有机器共享的目录，用于存放用户数据，与环境变量VOLUME_DIR_PREFIX相同
+              name: haios-share-volumes
+            - mountPath: /root/.kube
+              name: haios-kubelets-config
+              readOnly: true
+            - mountPath: /root/.ssh
+              name: haios-ssh-config
+              readOnly: true
+        - name: mysql-sync
+          image: 43.138.201.159:6655/sync_prod/sync:v1.1.0-gangkeguang
+          env:
+            - name: SYNC_CONFIG_PATH
+              value: "/app/configs/config.yml"
+          ports:
+            - containerPort: 28081
+          command: [ "sh", "-c", "sleep 30; exec ./sync-tool" ]
+      dnsPolicy: Default
+      nodeSelector:
+        node-role.kubernetes.io/master: ""
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      volumes:                                    # 下述9个路径需根据具体情况修改（必填）
+        - hostPath:
+            path: /data/haios/mysql/data         # 路径1：用于存放mysql数据库数据
+          name: haios-mysql-data
+        - hostPath:
+            path: /data/haios/mysql/log          # 路径2：用于存放mysql的log数据
+          name: haios-mysql-log
+        - hostPath:
+            path: /data/haios/mysql/conf/my.cnf  # 路径3：用于存放mysql配置文件
+          name: haios-mysql-config
+        - hostPath:
+            path: /data/VM/                      # 路径4：所有机器共享的目录，用于存放用户数据
+          name: haios-share-volumes
+        - hostPath:
+            path: /data/haios/pod_config         # 路径5：用于存放各个pod的配置文件
+          name: haios-app-pod-config
+        - hostPath:
+            path: /data/haios/logs               # 路径6：用于存放各个系统运行的log
+          name: haios-app-log
+        - hostPath:
+            path: /data/haios/D2VM               # 路径7：代码路径
+          name: haios-app
+        - hostPath:
+            path: /home/user/.kube               # 路径8：将kubelet配置文件映射进去，这样才有权限和kubelet apiserver通信
+          name: haios-kubelets-config
+        - hostPath:
+            path: /home/user/.ssh                # 路径9：将ssh配置文件映射进去，这样才有权限跨机器ssh通信
+          name: haios-ssh-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: haios-ports
+spec:
+  ports:
+    - name: back-end-port
+      nodePort: 32320     # 与前面设置的MASTER_PORT相同
+      port: 32320
+      protocol: TCP
+      targetPort: 32320
+  selector:
+    app: haios-ustgz
+  type: NodePort
