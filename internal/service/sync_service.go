@@ -237,6 +237,11 @@ func (s *SyncService) syncBatchData(table string, records []map[string]interface
 	)
 
 	return s.targetDB.Transaction(func(tx *gorm.DB) error {
+		// 在事务开始时关闭外键检查，防止 Error 1452 并发死锁
+		if err := tx.Exec("SET FOREIGN_KEY_CHECKS = 0").Error; err != nil {
+			log.Printf("警告: 无法关闭外键检查: %v", err)
+		}
+
 		// 1. 空记录检查
 		if len(records) == 0 {
 			return nil
@@ -299,56 +304,94 @@ func (s *SyncService) syncSingleRecord(tx *gorm.DB, table string, record map[str
 	return nil
 }
 
+// --- 新增：动态获取表的主键名 ---
+func (s *SyncService) getPrimaryKey(db *gorm.DB, tableName string) (string, error) {
+	var primaryKey string
+	// 查询 INFORMATION_SCHEMA 获取主键名
+	err := db.Raw(`
+		SELECT COLUMN_NAME 
+		FROM INFORMATION_SCHEMA.COLUMNS 
+		WHERE TABLE_SCHEMA = DATABASE() 
+		AND TABLE_NAME = ? 
+		AND COLUMN_KEY = 'PRI' 
+		LIMIT 1`, tableName).Scan(&primaryKey).Error
+
+	if err != nil {
+		return "", err
+	}
+	if primaryKey == "" {
+		// 如果没找到主键，默认回退到 id，但大概率会报错
+		return "id", nil
+	}
+	return primaryKey, nil
+}
+
 // 添加清理目标表的方法
 func (s *SyncService) cleanupTargetTable(sourceTable, targetTable string, columns []string) error {
-	// 检查目标表是否为空
-	var count int64
-	if err := s.targetDB.Table(targetTable).Count(&count).Error; err != nil {
-		return fmt.Errorf("检查目标表记录数失败: %w", err)
+	// 获取主键字段名 (动态获取，不再写死 "id")
+	primaryKey, err := s.getPrimaryKey(s.targetDB, targetTable)
+	if err != nil {
+		return fmt.Errorf("获取主键失败: %w", err)
+	}
+	if primaryKey == "id" {
+		log.Printf("提示: 未在表 %s 中找到显式主键，尝试使用 'id' 进行清理", targetTable)
 	}
 
-	// 如果目标表为空，则不需要清理
-	if count == 0 {
-		log.Printf("目标表 `%s` 为空，无需清理", targetTable)
+	// 使用事务包裹清理逻辑，并关闭外键检查
+	return s.targetDB.Transaction(func(tx *gorm.DB) error {
+		// 关闭外键检查，防止删除时因外键约束失败
+		if err := tx.Exec("SET FOREIGN_KEY_CHECKS = 0").Error; err != nil {
+			log.Printf("警告: 清理时无法关闭外键检查: %v", err)
+		}
+
+		// 检查目标表是否为空
+		var count int64
+		if err := tx.Table(targetTable).Count(&count).Error; err != nil {
+			return fmt.Errorf("检查目标表记录数失败: %w", err)
+		}
+
+		// 如果目标表为空，则不需要清理
+		if count == 0 {
+			log.Printf("目标表 `%s` 为空，无需清理", targetTable)
+			return nil
+		}
+
+		// 创建临时表来存储需要保留的记录
+		tempTable := fmt.Sprintf("temp_%s_%d", targetTable, time.Now().UnixNano())
+
+		// 创建临时表
+		createTempTableSQL := fmt.Sprintf("CREATE TEMPORARY TABLE `%s` LIKE `%s`", tempTable, targetTable)
+		if err := tx.Exec(createTempTableSQL).Error; err != nil {
+			return fmt.Errorf("创建临时表失败: %w", err)
+		}
+
+		// 将源表数据复制到临时表
+		copyDataSQL := fmt.Sprintf("INSERT INTO `%s` SELECT * FROM `%s`", tempTable, sourceTable)
+		if err := tx.Exec(copyDataSQL).Error; err != nil {
+			return fmt.Errorf("复制数据到临时表失败: %w", err)
+		}
+
+		// 构建主键条件（动态使用 primaryKey）
+		joinCondition := fmt.Sprintf("t1.`%s` = t2.`%s`", primaryKey, primaryKey)
+
+		// 删除目标表中不在临时表中的记录
+		deleteSQL := fmt.Sprintf("DELETE t1 FROM `%s` t1 LEFT JOIN `%s` t2 ON %s WHERE t2.`%s` IS NULL",
+			targetTable, tempTable, joinCondition, primaryKey)
+
+		if result := tx.Exec(deleteSQL); result.Error != nil {
+			return fmt.Errorf("清理目标表失败: %w", result.Error)
+		} else if result.RowsAffected > 0 {
+			log.Printf("已从目标表删除 %d 条不存在的记录", result.RowsAffected)
+		}
+
+		// 删除临时表
+		dropTempTableSQL := fmt.Sprintf("DROP TEMPORARY TABLE IF EXISTS `%s`", tempTable)
+		if err := tx.Exec(dropTempTableSQL).Error; err != nil {
+			log.Printf("删除临时表失败: %v", err)
+		}
+
 		return nil
-	}
-
-	// 创建临时表来存储需要保留的记录
-	tempTable := fmt.Sprintf("temp_%s_%d", targetTable, time.Now().UnixNano())
-
-	// 创建临时表
-	createTempTableSQL := fmt.Sprintf("CREATE TEMPORARY TABLE `%s` LIKE `%s`", tempTable, targetTable)
-	if err := s.targetDB.Exec(createTempTableSQL).Error; err != nil {
-		return fmt.Errorf("创建临时表失败: %w", err)
-	}
-
-	// 将源表数据复制到临时表
-	copyDataSQL := fmt.Sprintf("INSERT INTO `%s` SELECT * FROM `%s`", tempTable, sourceTable)
-	if err := s.targetDB.Exec(copyDataSQL).Error; err != nil {
-		return fmt.Errorf("复制数据到临时表失败: %w", err)
-	}
-
-	// 构建主键条件（只使用主键字段进行匹配）
-	primaryKey := "id" // 假设 id 是主键字段
-	joinCondition := fmt.Sprintf("t1.`%s` = t2.`%s`", primaryKey, primaryKey)
-
-	// 删除目标表中不在临时表中的记录
-	deleteSQL := fmt.Sprintf("DELETE t1 FROM `%s` t1 LEFT JOIN `%s` t2 ON %s WHERE t2.`%s` IS NULL",
-		targetTable, tempTable, joinCondition, primaryKey)
-
-	if result := s.targetDB.Exec(deleteSQL); result.Error != nil {
-		return fmt.Errorf("清理目标表失败: %w", result.Error)
-	} else if result.RowsAffected > 0 {
-		log.Printf("已从目标表删除 %d 条不存在的记录", result.RowsAffected)
-	}
-
-	// 删除临时表
-	dropTempTableSQL := fmt.Sprintf("DROP TEMPORARY TABLE IF EXISTS `%s`", tempTable)
-	if err := s.targetDB.Exec(dropTempTableSQL).Error; err != nil {
-		log.Printf("删除临时表失败: %v", err)
-	}
-
-	return nil
+	})
 }
 
 // 通知方法
