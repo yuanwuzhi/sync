@@ -1,45 +1,59 @@
-# 服务器配置
 server:
-  port: 28081          # 服务监听端口
-  host: "0.0.0.0"     # 服务监听地址
+  port: 28081
+  host: "0.0.0.0"
 
 # 数据库配置
 database:
-  # 源数据库配置
   source:
-    host: "localhost"          # 数据库主机地址
-    port: 3306                 # 数据库端口
-    user: "root"               # 数据库用户名
-    password: "your_password"  # 数据库密码
-    database: "source_db"      # 数据库名称
+    host: "mysql"
+    port: 3306
+    user: "haios_d2vm"
+    password: "haios_asimov"
+    database: "haios_db"
 
-  # 目标数据库配置
   target:
-    host: "remote_host"        # 远程数据库地址
-    port: 3306                 # 数据库端口
-    user: "root"               # 数据库用户名
-    password: "your_password"  # 数据库密码
-    database: "target_db"      # 数据库名称
+    host: "43.138.201.159"
+    port: 3306
+    user: "beilimosik_backup"
+    password: "YsncYiBhWQtdbwzH"
+    database: "beilimosik_backup"
 
 # 同步配置
 sync:
-  batch_size: 1000  # 每批分页同步数
-  interval: 300  # 同步间隔(秒)
-  sync_mode: "incremental"  # 可选值: "full" 或 "incremental"
-  table_pairs:  # 支持多表同步
-    - source: "user"
-      target: "user"
-      check_method: "update_time"  # checksum, count, update_time
-      update_field: "updated_at"  # 更新时间字段名
+  batch_size: 1000
+  interval: 300
+  sync_mode: "incremental"
+
+  table_pairs:
+    # 1. 父表 - ResourceGroup
+    # 注意：根据之前的Python代码，ResourceGroup 似乎没有 updated_at 字段。
+    # 如果确实没有，请保持 "checksum"。如果有，可以改为 "update_time"。
+    - source: "node_resourcegroup"
+      target: "node_resourcegroup"
+      check_method: "checksum"
+
+    # 2. 子表 - Node
+    # 已修复 updated_at 问题，改回高效同步
     - source: "node_node"
       target: "node_node"
-      check_method: "update_time"  # checksum, count, update_time
-      update_field: "updated_at"  # 更新时间字段名
-    - source: "container_container"
-      target: "container_container"
-      check_method: "update_time"  # checksum, count, update_time
-      update_field: "updated_at"  # 更新时间字段名
+      check_method: "update_time"
+      update_field: "updated_at"
+
+    # 3. Image
     - source: "image_image"
       target: "image_image"
-      check_method: "update_time"  # checksum, count, update_time
-      update_field: "updated_at"  # 更新时间字段名
+      check_method: "update_time"
+      update_field: "updated_at"
+
+    # 4. Container
+    - source: "container_container"
+      target: "container_container"
+      check_method: "update_time"
+      update_field: "updated_at"
+
+    # 5. User
+    # 假设 User 表也有 updated_at 或 last_login 等字段
+    - source: "user"
+      target: "user"
+      check_method: "update_time"
+      update_field: "updated_at"
