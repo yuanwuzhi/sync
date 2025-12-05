@@ -2,20 +2,30 @@ package service
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"math"
 	"strings"
 	"sync"
 	"sync/internal/config"
+	"time"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 	"gorm.io/gorm/schema"
-
-	"time"
 )
+
+// ColumnDetail 用于存储字段详细信息 (新增结构体，用于同步表结构)
+type ColumnDetail struct {
+	ColumnName    string         `gorm:"column:COLUMN_NAME"`
+	ColumnType    string         `gorm:"column:COLUMN_TYPE"`
+	IsNullable    string         `gorm:"column:IS_NULLABLE"`
+	ColumnDefault sql.NullString `gorm:"column:COLUMN_DEFAULT"`
+	Extra         string         `gorm:"column:EXTRA"`
+	ColumnComment string         `gorm:"column:COLUMN_COMMENT"`
+}
 
 // SyncTask 定义单个同步任务
 type SyncTask struct {
@@ -131,6 +141,15 @@ func (s *SyncService) syncAll() {
 func (s *SyncService) syncTable(task *SyncTask) {
 	s.notifyStart(task)
 
+	// ==========================================
+	// [新增] 步骤：同步表结构 (Schema Sync)
+	// 在获取数据前，先检查并修复目标表缺失的字段
+	// ==========================================
+	if err := s.syncTableSchema(task); err != nil {
+		s.notifyError(task, fmt.Errorf("同步表结构失败: %w", err))
+		return
+	}
+
 	// 获取表的所有字段
 	columns, err := s.getAllColumns(s.sourceDB, task.SourceTable)
 	if err != nil {
@@ -227,6 +246,86 @@ func (s *SyncService) syncTable(task *SyncTask) {
 	s.notifyComplete(task)
 }
 
+// [新增] syncTableSchema 对比源表和目标表的结构，自动添加目标表缺失的字段
+func (s *SyncService) syncTableSchema(task *SyncTask) error {
+	// 1. 获取源表详细字段信息
+	sourceCols, err := s.getColumnDetails(s.sourceDB, task.SourceTable)
+	if err != nil {
+		return fmt.Errorf("获取源表结构失败: %w", err)
+	}
+
+	// 2. 获取目标表所有字段名 (为了快速查找是否存在)
+	targetColNames, err := s.getAllColumns(s.targetDB, task.TargetTable)
+	if err != nil {
+		return fmt.Errorf("获取目标表结构失败: %w", err)
+	}
+
+	targetColMap := make(map[string]bool)
+	for _, name := range targetColNames {
+		targetColMap[name] = true
+	}
+
+	// 3. 遍历源表字段，检查目标表是否缺失
+	for _, col := range sourceCols {
+		if !targetColMap[col.ColumnName] {
+			log.Printf("检测到表 %s 在目标库缺失字段: %s (%s)，正在自动修复...", task.TargetTable, col.ColumnName, col.ColumnType)
+
+			// 构建 ALTER TABLE 语句
+			// 示例: ALTER TABLE `mytable` ADD COLUMN `new_col` varchar(255) DEFAULT NULL COMMENT 'xxx'
+			sql := fmt.Sprintf("ALTER TABLE `%s` ADD COLUMN `%s` %s", task.TargetTable, col.ColumnName, col.ColumnType)
+
+			// 处理 NOT NULL
+			if col.IsNullable == "NO" {
+				sql += " NOT NULL"
+			} else {
+				sql += " NULL"
+			}
+
+			// 处理默认值
+			if col.ColumnDefault.Valid {
+				sql += fmt.Sprintf(" DEFAULT '%s'", col.ColumnDefault.String)
+			}
+
+			// 处理注释
+			if col.ColumnComment != "" {
+				escapedComment := strings.ReplaceAll(col.ColumnComment, "'", "\\'")
+				sql += fmt.Sprintf(" COMMENT '%s'", escapedComment)
+			}
+
+			// 执行 DDL
+			if err := s.targetDB.Exec(sql).Error; err != nil {
+				log.Printf("尝试添加字段失败: %v, SQL: %s", err, sql)
+				return err
+			}
+			log.Printf("成功添加字段: %s 到表 %s", col.ColumnName, task.TargetTable)
+		}
+	}
+	return nil
+}
+
+// [新增] getColumnDetails 获取表字段的详细信息（用于生成DDL）
+func (s *SyncService) getColumnDetails(db *gorm.DB, tableName string) ([]ColumnDetail, error) {
+	var details []ColumnDetail
+	// 注意：information_schema 查询需要指定 TABLE_SCHEMA = DATABASE() 避免查到其他库同名表
+	err := db.Raw(`
+		SELECT 
+			COLUMN_NAME, 
+			COLUMN_TYPE, 
+			IS_NULLABLE, 
+			COLUMN_DEFAULT, 
+			EXTRA, 
+			COLUMN_COMMENT 
+		FROM INFORMATION_SCHEMA.COLUMNS 
+		WHERE TABLE_SCHEMA = DATABASE() 
+		AND TABLE_NAME = ? 
+		ORDER BY ORDINAL_POSITION`, tableName).Scan(&details).Error
+
+	if err != nil {
+		return nil, err
+	}
+	return details, nil
+}
+
 // 同步批量数据
 func (s *SyncService) syncBatchData(table string, records []map[string]interface{}) error {
 	// 定义重试策略
@@ -304,16 +403,16 @@ func (s *SyncService) syncSingleRecord(tx *gorm.DB, table string, record map[str
 	return nil
 }
 
-// --- 新增：动态获取表的主键名 ---
+// --- 动态获取表的主键名 ---
 func (s *SyncService) getPrimaryKey(db *gorm.DB, tableName string) (string, error) {
 	var primaryKey string
 	// 查询 INFORMATION_SCHEMA 获取主键名
 	err := db.Raw(`
-		SELECT COLUMN_NAME 
-		FROM INFORMATION_SCHEMA.COLUMNS 
-		WHERE TABLE_SCHEMA = DATABASE() 
-		AND TABLE_NAME = ? 
-		AND COLUMN_KEY = 'PRI' 
+		SELECT COLUMN_NAME
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = DATABASE()
+		AND TABLE_NAME = ?
+		AND COLUMN_KEY = 'PRI'
 		LIMIT 1`, tableName).Scan(&primaryKey).Error
 
 	if err != nil {
@@ -418,7 +517,7 @@ func (s *SyncService) notifyError(task *SyncTask, err error) {
 	}
 }
 
-// Stop 止同步服务
+// Stop 停止同步服务
 func (s *SyncService) Stop() {
 	s.cancel()
 }
